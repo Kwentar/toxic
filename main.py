@@ -5,6 +5,8 @@ import nltk
 import string
 import itertools
 import re
+
+from keras.engine import Layer
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 from string import punctuation
@@ -13,14 +15,16 @@ from tqdm import tqdm
 
 from word2vec import clean_data
 
-stop_words = set(stopwords.words('english'))
 from keras.models import Model
-from keras.layers import Dense, Embedding, Input
+from keras.layers import Dense, Embedding, Input, GRU
 from keras.layers import LSTM, Bidirectional, GlobalMaxPool1D, Dropout
 from keras.preprocessing import text, sequence
 from keras.callbacks import EarlyStopping, ModelCheckpoint
 
+from keras import initializers
+from keras import backend as K
 
+stop_words = set(stopwords.words('english'))
 
 
 def preprocessing_text(lst_with_text):
@@ -36,21 +40,7 @@ def preprocessing_text(lst_with_text):
                 replaced.add(sym)
         lst_new.append(tmp_str2)
     return lst_new
-'''
-df = pd.read_csv('train.csv')
-print(df.head())
-column = 'toxic'
 
-filtered_df = df.filter(items=['id', 'comment_text', column])
-true_value = filtered_df[filtered_df[column] == 1]
-false_value = filtered_df[filtered_df[column] == 0]
-lst_true = true_value['comment_text'].tolist()
-lst_false = false_value['comment_text'].tolist()
-print(filtered_df[filtered_df[column] == 1].head())
-print(true_value.shape, false_value.shape, filtered_df.shape)
-
-for el in lst_true[:2]:
-    print(el, clean_data(el))'''
 
 def aaaa():
     # This Python 3 environment comes with many helpful analytics libraries installed
@@ -150,7 +140,7 @@ def convert_sentence_to_indexes(text, inverse_index_dict, word2vec_model, max_le
     if len(res) > max_len:
         res = res[:max_len]
     elif len(res) < max_len:
-        res = np.concatenate((res, np.array([len(word2vec.wv.vocab)] * (max_len - len(res)))))
+        res = np.concatenate((res, np.array([len(word2vec_model.wv.vocab)] * (max_len - len(res)))))
     return res
 
 
@@ -172,7 +162,7 @@ def get_model(vector_size, word_count, max_sequence_length, embedding_weights):
                                 weights=[embedding_weights],
                                 input_length=max_sequence_length,
                                 trainable=False)(inp)
-    x = Bidirectional(LSTM(100, return_sequences=True))(embedding_layer)
+    x = Bidirectional(GRU(100, return_sequences=True))(embedding_layer)
     x = GlobalMaxPool1D()(x)
     x = Dropout(0.4)(x)
     x = Dense(50, activation="relu")(x)
@@ -186,46 +176,110 @@ def get_model(vector_size, word_count, max_sequence_length, embedding_weights):
     return model
 
 
-train = pd.read_csv("train.csv")
+class AttLayer(Layer):
+    def __init__(self, **kwargs):
+        self.init = initializers.get('normal')
+        super(AttLayer, self).__init__(** kwargs)
 
-train = train.sample(frac=1)
+    def build(self, input_shape):
+        assert len(input_shape) == 3
+        self.W = self.init((input_shape[-1],))
+        self.trainable_weights = [self.W]
+        super(AttLayer, self).build(input_shape)  # be sure you call this somewhere!
 
-list_sentences_train = train["comment_text"].fillna("CVxTz").values
-list_classes = ["toxic", "severe_toxic", "obscene", "threat", "insult", "identity_hate"]
-y = train[list_classes].values
+    def call(self, x, mask=None):
+        eij = K.tanh(K.dot(x, self.W))
 
-word2vec = gensim.models.Word2Vec.load('w2v.model')
+        ai = K.exp(eij)
+        weights = ai/K.sum(ai, axis=1).dimshuffle(0,'x')
 
-forward_index, invert_index = make_index(word2vec)
+        weighted_input = x*weights.dimshuffle(0,1,'x')
+        return weighted_input.sum(axis=1)
+
+    def get_output_shape_for(self, input_shape):
+        return input_shape[0], input_shape[-1]
+
+def train():
+    train = pd.read_csv("train.csv")
+
+    train = train.sample(frac=1)
+
+    list_sentences_train = train["comment_text"].fillna("CVxTz").values
+    list_classes = ["toxic", "severe_toxic", "obscene", "threat", "insult", "identity_hate"]
+    y = train[list_classes].values
+
+    word2vec = gensim.models.Word2Vec.load('w2v.model')
+
+    forward_index, invert_index = make_index(word2vec)
 
 
-train_sentences = list()
-max_len = 300
-for sentence in tqdm(list_sentences_train, desc='normalize sentences'):
-    norm_sentence = convert_sentence_to_indexes("make ready do", invert_index, word2vec, max_len)
+    train_sentences = list()
+    max_len = 300
+    for sentence in tqdm(list_sentences_train, desc='normalize sentences'):
+        norm_sentence = convert_sentence_to_indexes(sentence, invert_index, word2vec, max_len)
 
-    train_sentences.append(norm_sentence)
-train_sentences = np.array(train_sentences)
-
-
-embedding_matrix = np.zeros((len(word2vec.wv.vocab)+1, word2vec.vector_size))
-for word, i in tqdm(invert_index.items(), desc='create embedding weights'):
-    if word in word2vec.wv.vocab:
-        embedding_matrix[i] = word2vec.wv[word]
-
-print('Null word embeddings: %d' % np.sum(np.sum(embedding_matrix, axis=1) == 0))
+        train_sentences.append(norm_sentence)
 
 
-model = get_model(word2vec.vector_size, len(word2vec.wv.vocab), max_len, embedding_matrix)
+    train_sentences = np.array(train_sentences)
 
-batch_size = 32
-epochs = 20
 
-file_path = "weights_base.best.hdf5"
-checkpoint = ModelCheckpoint(file_path, monitor='val_loss', verbose=1, save_best_only=True, mode='min')
+    embedding_matrix = np.zeros((len(word2vec.wv.vocab)+1, word2vec.vector_size))
+    for word, i in tqdm(invert_index.items(), desc='create embedding weights'):
+        if word in word2vec.wv.vocab:
+            embedding_matrix[i] = word2vec.wv[word]
 
-early = EarlyStopping(monitor="val_loss", mode="min", patience=20)
+    print('Null word embeddings: %d' % np.sum(np.sum(embedding_matrix, axis=1) == 0))
 
-callbacks_list = [checkpoint, early]  # early
-model.fit(train_sentences, y, batch_size=batch_size, epochs=epochs, validation_split=0.1, callbacks=callbacks_list)
 
+    model = get_model(word2vec.vector_size, len(word2vec.wv.vocab), max_len, embedding_matrix)
+
+    batch_size = 32
+    epochs = 20
+
+    file_path = "weights_base.best.hdf5"
+    checkpoint = ModelCheckpoint(file_path, monitor='val_loss', verbose=1, save_best_only=True, mode='min')
+
+    early = EarlyStopping(monitor="val_loss", mode="min", patience=20)
+
+    callbacks_list = [checkpoint, early]  # early
+    model.fit(train_sentences, y, batch_size=batch_size, epochs=epochs, validation_split=0.1, callbacks=callbacks_list)
+
+def predict():
+    test = pd.read_csv("test.csv")
+
+    list_sentences_test = test["comment_text"].fillna("CVxTz").values
+
+    word2vec = gensim.models.Word2Vec.load('w2v.model')
+
+    forward_index, invert_index = make_index(word2vec)
+    train_sentences = list()
+    max_len = 300
+    for sentence in tqdm(list_sentences_test, desc='normalize sentences'):
+        norm_sentence = convert_sentence_to_indexes(sentence, invert_index, word2vec, max_len)
+
+        train_sentences.append(norm_sentence)
+
+    train_sentences = np.array(train_sentences)
+
+    embedding_matrix = np.zeros((len(word2vec.wv.vocab) + 1, word2vec.vector_size))
+    for word, i in tqdm(invert_index.items(), desc='create embedding weights'):
+        if word in word2vec.wv.vocab:
+            embedding_matrix[i] = word2vec.wv[word]
+
+
+    model = get_model(word2vec.vector_size, len(word2vec.wv.vocab), max_len, embedding_matrix)
+    file_path = "weights_base.best.hdf5"
+
+    model.load_weights(file_path)
+
+    y_test = model.predict(train_sentences)
+
+    sample_submission = pd.read_csv("sample_submission.csv")
+    list_classes = ["toxic", "severe_toxic", "obscene", "threat", "insult", "identity_hate"]
+
+    sample_submission[list_classes] = y_test
+
+    sample_submission.to_csv("baseline.csv", index=False)
+
+train()
