@@ -1,31 +1,41 @@
-import numpy
-from keras.datasets import imdb
-from keras.models import Sequential
-from keras.layers import Dense
-from keras.layers import LSTM
-from keras.layers import Dropout
-from keras.layers.embeddings import Embedding
-from keras.preprocessing import sequence
-# fix random seed for reproducibility
-numpy.random.seed(7)
-# load the dataset but only keep the top n words, zero the rest
-top_words = 5000
-(X_train, y_train), (X_test, y_test) = imdb.load_data(num_words=top_words)
-# truncate and pad input sequences
-max_review_length = 500
-X_train = sequence.pad_sequences(X_train, maxlen=max_review_length)
-X_test = sequence.pad_sequences(X_test, maxlen=max_review_length)
-# create the model
-embedding_vecor_length = 32
-model = Sequential()
-model.add(Embedding(top_words, embedding_vecor_length, input_length=max_review_length))
-model.add(Dropout(0.2))
-model.add(LSTM(100))
-model.add(Dropout(0.2))
-model.add(Dense(1, activation='sigmoid'))
-model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
-print(model.summary())
-model.fit(X_train, y_train, epochs=3, batch_size=64)
-# Final evaluation of the model
-scores = model.evaluate(X_test, y_test, verbose=0)
-print("Accuracy: %.2f%%" % (scores[1]*100))
+import re
+from nltk.corpus import stopwords
+
+import numpy as np
+import pandas as pd
+
+stop_words = set(stopwords.words('english'))
+
+
+def create_features(file_name):
+    df = pd.read_csv(file_name)
+
+    df['count_sent'] = df["comment_text"].apply(lambda x: len(re.findall("\n", str(x)))+1)
+
+    # Unique word count
+    df['count_unique_word'] = df["comment_text"].apply(lambda x: len(set(str(x).split())))
+
+    # title case words count
+    df["count_words_title"] = df["comment_text"].apply(lambda x: len([w for w in str(x).split() if w.istitle()]))
+    df["count_words_upper"] = df["comment_text"].apply(lambda x: len([w for w in str(x).split() if w.isupper()]))
+
+    # Average length of the words
+    df["mean_word_len"] = df["comment_text"].apply(lambda x: np.mean([len(w) for w in str(x).split()]))
+    df["mean_word_len"] = df["mean_word_len"].apply(lambda x: x if x < 30 else 30)
+    df['count_word'] = df["comment_text"].apply(lambda x: len(str(x).split()))
+    df['word_unique_percent'] = df['count_unique_word']/df['count_word']
+    df['count_word'] = df["count_word"].apply(lambda x: x if x < 300 else 300)
+    df['count_unique_word'] = df["count_unique_word"].apply(lambda x: x if x < 300 else 300)
+
+    # derived features
+    toxic_words = ['fuck', 'shit', 'suck', 'bitch', 'stupid']
+    threat_words = ['kill', 'die', 'rape', 'death']
+    identity_words = ['gay', 'nigger', 'jew']
+    df['toxic_count'] = df["comment_text"].apply(lambda x: len([w for w in str(x).split() if w in toxic_words]))
+    df['threat_count'] = df["comment_text"].apply(lambda x: len([w for w in str(x).split() if w in threat_words]))
+    df['identity_count'] = df["comment_text"].apply(lambda x: len([w for w in str(x).split() if w in identity_words]))
+
+    list_classes = ['count_sent', 'count_unique_word', 'count_words_title', 'count_words_upper',
+                    'mean_word_len', 'word_unique_percent', 'toxic_count', 'threat_count', 'identity_count']
+
+    return df[list_classes].values
